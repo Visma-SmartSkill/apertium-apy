@@ -1,94 +1,37 @@
-name: Main
+name: "Main build"
+
+# This workflow invokes the standard SmartSkill build and deploy workflows.
 
 on:
   push:
-    branches:
-      - master
+    branches: ["main", "master"]
   pull_request:
-
-env:
-  LANG: C.UTF-8
+  workflow_dispatch:
 
 jobs:
-  test:
+  build-apertium-apy:
+    name: Build VssTranslate
+    uses: ./.github/workflows/buildcontainer.yml
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
+    with:
+      service-name: ${{ vars.SERVICE_NAME }}
+      trigger-release: false
+    secrets:
+      CREATERELEASETOKEN: ${{ secrets.CREATERELEASETOKEN }}
+
+  tag:
+    name: Tag release
+    needs: build-apertium-apy
     runs-on: ubuntu-latest
-    container: ghcr.io/apertium/apertium-apy-cicd
-    strategy:
-      matrix:
-        python-version:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          # https://github.com/pypa/pipenv/issues/6010
-          # - "3.12"
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - name: 🏷️ Release
+        uses: softprops/action-gh-release@v2
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pipenv
-      - name: Install Pipenv
-        run: python -m pip install pipenv
-      - name: Install Pip dependencies
-        run: pipenv install --deploy --dev
-
-      - name: Build
-        run: pipenv run make
-
-      - name: Install system dependencies
-        run: apt-get update && apt-get install -y file
-
-      - name: Test
-        run: NONPAIRS=/tmp/languages pipenv run make unit-test
-  lint:
-    runs-on: ubuntu-latest
-    container: ghcr.io/apertium/apertium-apy-cicd
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pipenv
-      - name: Install Pipenv
-        run: python -m pip install pipenv
-      - name: Install Pip dependencies
-        run: pipenv install --deploy --dev
-
-      - name: Build
-        run: pipenv run make
-
-      - name: Lint
-        run: pipenv run make lint
-  coverage:
-    runs-on: ubuntu-latest
-    container: ghcr.io/apertium/apertium-apy-cicd
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pipenv
-      - name: Install Pipenv
-        run: python -m pip install pipenv
-      - name: Install Pip dependencies
-        run: pipenv install --deploy --dev
-
-      - name: Build
-        run: pipenv run make
-
-      - name: Install system dependencies
-        run: apt-get update && apt-get install -y file
-
-      - name: Test
-        run: NONPAIRS=/tmp/languages pipenv run make coverage
-
-      - name: Coveralls
-        run: pipenv run coveralls --service=github
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: v${{ needs.build-apertium-apy.outputs.version }}
+          token: ${{ secrets.CREATERELEASETOKEN }} # A PAT is required to trigger the deployment workflow (GitHub's way of preventing recursive workflows)
+          prerelease: ${{ github.base_ref != '' && true || false }}
+          target_commitish: ${{ github.sha }}
