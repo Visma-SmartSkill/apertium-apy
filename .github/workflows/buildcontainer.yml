@@ -1,0 +1,116 @@
+name: Build Container
+# Builds and publishes SmartSkill applications to Azure Container Registry
+# Deployment of the container is done in a separate workflow
+# This workflow returns the version number of the docker image
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: The name of the service to be deployed.
+        required: true
+        type: string
+      trigger-release:
+        description: Trigger a release.
+        default: true
+        type: boolean
+    secrets:
+      CREATERELEASETOKEN:
+        description: "A GitHub token with the 'content:write' scope to create releases."
+        required: true
+
+    outputs:
+      version:
+        description: "The version of the docker image that was built."
+        value: ${{ jobs.build.outputs.version }}
+jobs:
+  preparation:
+    name: Preparation
+    runs-on: ubuntu-latest
+    outputs:
+      organization: ${{ steps.lower-service-name.outputs.organization }}
+      container-repository: ${{ steps.lower-service-name.outputs.organization }}/${{ inputs.service-name }}
+    steps:
+      - id: lower-service-name
+        name: 🔹 lowercase service name
+        run: |
+          echo "organization=${GITHUB_REPOSITORY_OWNER@L}" >> $GITHUB_OUTPUT
+
+  build:
+    env:
+      REGISTRY: ghcr.io
+    runs-on: ubuntu-latest
+    needs: preparation
+    name: Build
+    permissions:
+      packages: write
+      contents: read
+    environment: ${{ github.event.inputs.environment }}
+
+    outputs:
+      version: ${{ steps.pickversion.outputs.version }}
+
+    steps:
+      - name: 🗳️ Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ⛽ Install GitVersion
+        uses: gittools/actions/gitversion/setup@d0139503a9321f76b4a417dfdc8aebcec24decdd
+        with:
+          versionSpec: "6.3.0"
+
+      - name: 🔬 Determine Version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@d0139503a9321f76b4a417dfdc8aebcec24decdd
+
+      - name: ⛏️ Pick Version
+        id: pickversion
+        # Use fullSemVer for main branch builds and informationalVersion (includes the latest commit's SHA) for PR builds
+        run: |
+          version=${{steps.gitversion.outputs.fullSemVer }}
+          baseref=${{ github.base_ref }}
+          betasuffix=''
+          if [ $baseref ]; then
+            version="$version-${{ steps.gitversion.outputs.shortSha }}"
+            betasuffix='-beta'
+          fi
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "betasuffix=$betasuffix" >> $GITHUB_OUTPUT
+
+      - name: 🔧 Setup Docker BuildX
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔓 Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🧱 Build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            "${{ env.REGISTRY }}/${{ needs.preparation.outputs.container-repository }}:latest${{ steps.pickversion.outputs.betasuffix}}"
+            "${{ env.REGISTRY }}/${{ needs.preparation.outputs.container-repository }}:${{ steps.pickversion.outputs.version }}"
+          secrets: "github_token=${{ secrets.GITHUB_TOKEN }}"
+
+  tag:
+    if: inputs.trigger-release
+    name: Tag release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🏷️ Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          token: ${{ secrets.CREATERELEASETOKEN }} # A PAT is required to trigger the deployment workflow (GitHub's way of preventing recursive workflows)
+          prerelease: ${{ github.base_ref != '' && true || false }}
+          target_commitish: ${{ github.sha }}
